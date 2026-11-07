@@ -1,0 +1,1396 @@
+# MASTER IMPLEMENTATION PROMPT — PROJECT TORQ
+## Existing Codebase Audit, Mandatory Compliance Fixes, Crash-Safety Improvements & Final Hackathon Hardening
+
+You are acting as a **Principal Go Storage-Engine Engineer, Database Reliability Engineer, and Hackathon Code Auditor**.
+
+I am uploading my existing Project TORQ repository as a ZIP file. Your task is to inspect the complete existing codebase, identify gaps against the original 19-page problem statement **"Kill It and Prove It"**, and implement the missing mandatory requirements and additional reliability improvements directly into the existing project.
+
+This is an existing implementation. Do NOT create a new database from scratch.
+
+Your objective is to make the existing Project TORQ as correct, testable, reproducible, maintainable, and judge-ready as possible within the stated constraints.
+
+---
+
+# PART 1 — PROJECT CONTEXT
+
+Project name: **TORQ — Crash-Safe Embedded Key-Value Database**
+
+Current implementation:
+
+- Database engine: Go 1.22.
+- Database persistence: custom append-only WAL.
+- Python torture tool: Python 3 standard library.
+- Storage format: custom binary records with CRC32.
+- Index: in-memory hash index.
+- Concurrency: Go synchronization primitives, including RWMutex.
+- Compaction: temporary snapshot and file replacement.
+- Disk-full protection: configurable maximum database file size.
+- Tests: Go unit tests, concurrency tests, recovery tests, compaction tests, torture scenario tests, disk-full tests, and benchmark tests.
+- Documentation: README.md, ARCHITECTURE.md, BREAKING.md, PROMPTS.md, DEMO.md.
+
+Existing directories include:
+
+```text
+cmd/
+  kvdb/
+
+internal/
+  cli/
+  compaction/
+  db/
+  failpoint/
+  index/
+  limits/
+  recovery/
+  wal/
+
+tests/
+torture/
+```
+
+The existing CLI appears to contain:
+
+```text
+open
+put
+get
+del
+batch
+dump
+check
+compact
+serve
+```
+
+The existing torture tool already supports several workload modes and command-line flags, including `--iterations`, `--rounds`, `--seed`, `--mode`, and `--self-test`.
+
+These are observations from the supplied project archive, not proof that every feature works correctly. Inspect the actual source code before making decisions.
+
+---
+
+# PART 2 — NON-NEGOTIABLE RULES
+
+Follow these rules throughout the implementation.
+
+1. Preserve the existing Go database architecture wherever it is correct.
+2. Do not replace the database with SQLite, LevelDB, RocksDB, BoltDB, Badger, Redis, or any other storage engine.
+3. Do not use any external database, persistence, WAL, journaling, B-tree, or LSM-tree library.
+4. Use Go standard library packages for database implementation.
+5. Use Python standard library packages for the independent torture tool.
+6. Do not copy source code from an existing database implementation.
+7. Do not introduce unnecessary dependencies.
+8. Do not replace working functionality merely to make the architecture look different.
+9. Do not delete existing tests to make the test suite pass.
+10. Do not weaken assertions or hide failures.
+11. Do not fabricate benchmark numbers, test results, or successful verification claims.
+12. Do not hardcode test outputs or fake ACK responses.
+13. Preserve meaningful Git history and do not recommend one giant final commit.
+14. Every change must be explained and tested.
+15. Maintain compatibility with Windows because the project is developed and demonstrated on a Windows laptop.
+16. Also consider Linux and macOS filesystem semantics where relevant.
+17. The final database must work offline.
+18. Do not build a website, dashboard, frontend, authentication system, or TCP server as part of the database requirements. The judge interacts through the CLI and torture tool.
+
+**Most important:** Do not assume that a feature is missing just because it is not described in this prompt. Inspect the source code first. If it already works correctly, preserve it and add verification rather than duplicating it.
+
+---
+
+# PART 3 — FIRST ACTION: COMPLETE CODEBASE AUDIT
+
+Before editing anything, inspect the entire repository.
+
+Read:
+
+- go.mod
+- README.md
+- ARCHITECTURE.md
+- BREAKING.md
+- PROMPTS.md
+- DEMO.md
+- All Go source files
+- All Go test files
+- torture/torture.py
+- Shell and Windows launcher scripts
+- Any existing benchmark and failure-injection code
+
+Create an internal implementation inventory covering:
+
+1. Existing functionality.
+2. Correctly implemented mandatory requirements.
+3. Partially implemented requirements.
+4. Missing requirements.
+5. Potential correctness bugs.
+6. Performance bottlenecks.
+7. Platform-specific risks.
+8. Documentation inaccuracies.
+9. Tests that do not actually test what their names claim.
+10. Features that exist but are not exposed through the required interface.
+
+Before making modifications, produce a concise audit report.
+
+Use this classification:
+
+- PASS — verified through source inspection and/or a successful test.
+- PARTIAL — implementation exists but needs further work or proof.
+- FAIL — requirement is missing or incorrect.
+- UNVERIFIED — source inspection alone is insufficient and a test is required.
+
+Do not claim PASS simply because a function exists.
+
+After this initial report, proceed to implementation. Do not stop and wait for my approval unless a destructive action or genuinely essential decision requires it.
+
+---
+
+# PART 4 — MANDATORY DATABASE REQUIREMENTS
+
+Verify and preserve the six required library operations:
+
+```text
+put(key, value)
+get(key)
+delete(key)
+batch(operations)
+open(path)
+close()
+```
+
+Required behavior:
+
+### put
+
+- Store a key-value pair.
+- Overwrite an existing key.
+- Return success only after the write is durable.
+- Validate key and value limits.
+
+### get
+
+- Return the latest committed value.
+- Return NOTFOUND for a missing key.
+- Never return partially written or corrupted data.
+- Support concurrent reads.
+
+### delete
+
+- Remove an existing key.
+- Deleting a missing key must not be an error.
+- Once acknowledged, the deletion must survive restart.
+
+### batch
+
+- Support up to 10,000 operations.
+- Support both PUT and DELETE operations.
+- Treat the entire batch as one atomic operation.
+- Never expose a partially committed batch.
+- Return success only after the batch is durably committed.
+
+### open
+
+- Create or open a database file.
+- Recover after an interrupted write.
+- Recover after interrupted compaction.
+- Recover after a crash during an earlier recovery operation.
+- Rebuild the in-memory index correctly.
+- Complete recovery for one million keys in less than two seconds.
+
+### close
+
+- Flush and close the database safely.
+- Handle repeated or concurrent close attempts appropriately.
+- Ensure that a process killed during close does not violate the durability invariant.
+- Do not rely on graceful cleanup to guarantee correctness.
+
+### Required limits
+
+| Requirement | Limit |
+|---|---:|
+| Minimum key length | 1 byte |
+| Maximum key length | 1,024 bytes |
+| Maximum value length | 1 MB |
+| Minimum database capacity | 1,000,000 keys |
+| Maximum batch operations | 10,000 |
+
+Check whether the existing implementation uses byte lengths rather than character counts.
+
+Add boundary tests for:
+
+- Empty key.
+- 1-byte key.
+- 1,024-byte key.
+- 1,025-byte key.
+- Empty value.
+- Maximum-size value.
+- Value exceeding 1 MB.
+- Exactly 10,000 batch operations.
+- Batch containing 10,001 operations.
+
+Do not change the specification's limits.
+
+---
+
+# PART 5 — DURABILITY AND WAL HARDENING
+
+Inspect the existing binary WAL format.
+
+The format must be accurately documented, including:
+
+- Magic number.
+- Format version.
+- Record length.
+- Checksum.
+- Operation type.
+- Key length.
+- Value length.
+- Transaction or batch identifier, if applicable.
+- Commit marker, if applicable.
+- Byte ordering.
+- Exact field widths.
+- Header and record boundaries.
+
+Verify the record encoder and decoder against each other.
+
+Add tests for:
+
+1. Valid record decoding.
+2. Invalid magic number.
+3. Unsupported version.
+4. Invalid record length.
+5. Invalid opcode.
+6. Invalid key length.
+7. Invalid value length.
+8. CRC mismatch.
+9. Incomplete record header.
+10. Incomplete record body.
+11. Truncated final record.
+12. Multiple valid records followed by a truncated record.
+13. Empty WAL.
+14. WAL containing only a valid header.
+15. Large records.
+
+### Durability ordering
+
+Inspect the actual write path.
+
+The implementation must establish this guarantee:
+
+**If an operation has returned success to the caller, its committed data must survive a process crash.**
+
+For individual writes, establish a correct ordering between:
+
+- Appending the record.
+- Synchronizing the file.
+- Updating the visible index.
+- Returning success.
+
+For batches, establish an equally rigorous ordering that guarantees all-or-nothing recovery.
+
+If the current format uses a BEGIN/operation/COMMIT protocol:
+
+- Validate transaction identifiers.
+- Validate all operation records.
+- Validate the commit marker.
+- Replay only fully committed batches.
+- Ignore or truncate incomplete transactions.
+- Ensure a valid commit cannot exist without its required data being durable.
+
+If the current format stores an entire batch as one record, validate its complete length and checksum before making any operation visible.
+
+Do not redesign a correct format unnecessarily.
+
+### Important recovery rule
+
+Recovery must distinguish:
+
+- Valid committed records.
+- Incomplete records.
+- Uncommitted transactions.
+- Invalid final records.
+- Previously committed records.
+
+Only the valid committed state should be visible.
+
+Document the exact point at which the database considers an operation committed and the exact point at which it sends an ACK.
+
+---
+
+# PART 6 — CLI COMPLIANCE
+
+The problem statement requires these exact commands.
+
+Verify that all eight work from the repository root.
+
+```bash
+./kvdb open <path> [--max-bytes N]
+
+./kvdb put <path> <key> <value>
+
+./kvdb get <path> <key>
+
+./kvdb del <path> <key>
+
+./kvdb batch <path> <file>
+
+./kvdb dump <path>
+
+./kvdb check <path>
+
+./kvdb serve <path>
+```
+
+The project may retain additional useful commands such as:
+
+```bash
+./kvdb compact <path>
+./kvdb stats <path>
+```
+
+But additional commands must not replace mandatory ones.
+
+### CLI requirements
+
+**open**
+
+- Open or create the database.
+- Perform recovery.
+- Print key count and recovery time.
+- Support the configured maximum file size.
+
+**put**
+
+- Accept a path, key and value.
+- Print an appropriate success or error response.
+
+**get**
+
+- Print the value or NOTFOUND.
+
+**del**
+
+- Delete a key.
+- Treat a missing key as a valid no-op.
+
+**batch**
+
+- Read operations from a file.
+- Support one operation per line.
+- Support the required PUT and DELETE operations.
+- Reject malformed input safely.
+- Never partially apply a batch.
+
+**dump**
+
+- Print all current key-value pairs.
+- Sort by key.
+- Never display deleted keys or uncommitted data.
+
+**check**
+
+- Verify database integrity.
+- Print OK when validation succeeds.
+- Print a meaningful failure reason otherwise.
+
+**serve**
+
+- Run as a long-lived stdin/stdout command processor.
+- Accept operations from stdin.
+- Support the required operations.
+- Print `ACK <op-id>` only after the operation is durable.
+- Never print a success ACK before the durability guarantee is satisfied.
+- Keep diagnostic messages on stderr.
+- Ensure stdout contains only protocol responses.
+- Support multiple concurrent writers if the existing protocol supports them.
+- Ensure a batch is handled atomically.
+
+Do not convert `serve` into a TCP server. Network access is not required.
+
+Create Windows-compatible launchers where needed:
+
+```text
+kvdb.cmd
+torture.cmd
+```
+
+Verify that the README's exact build and execution commands work on Windows.
+
+---
+
+# PART 7 — TORTURE TOOL: UPGRADE TO FULL SPECIFICATION
+
+This is one of the most important areas.
+
+The existing Python torture tool must be improved without replacing its independent oracle architecture.
+
+### 7.1 Default iteration count
+
+The problem statement requires:
+
+```bash
+./torture --iterations 500 --seed 12345
+```
+
+The default iteration count must be:
+
+```text
+500
+```
+
+The tool should support:
+
+```bash
+./torture
+./torture --iterations 500 --seed 12345
+./torture --rounds 500 --seed 12345
+```
+
+If both `--iterations` and `--rounds` are provided, handle the conflict clearly rather than silently choosing an arbitrary value.
+
+The seed must provide reproducibility.
+
+The same seed and configuration should reproduce the same generated workload and kill scheduling decisions as closely as practical.
+
+Document the limitations of reproducing OS scheduling and process timing.
+
+### 7.2 Independent oracle
+
+The Python tool must maintain an independent ground-truth model.
+
+It must:
+
+1. Record every acknowledged operation.
+2. Maintain its own expected key-value state.
+3. Track batch boundaries.
+4. Track operation IDs.
+5. Track durable ACKs.
+6. Compare recovered database output against the oracle.
+7. Detect missing acknowledged data.
+8. Detect unexpected keys.
+9. Detect incorrect values.
+10. Detect partial batches.
+11. Detect corrupted or mixed values.
+
+Never trust the database's own dump as the oracle.
+
+### 7.3 Random crash timing
+
+The torture tool must:
+
+1. Start the database as a child process.
+2. Send random operations.
+3. Use at least two concurrent writers.
+4. Randomly select a kill delay in milliseconds.
+5. Kill the child process without graceful shutdown.
+6. Restart the database.
+7. Run `check`.
+8. Run `dump`.
+9. Compare the result with the independent oracle.
+10. Stop immediately when a failure is detected.
+
+Use the appropriate OS-specific forced termination:
+
+- Linux/macOS: SIGKILL.
+- Windows: forceful process termination equivalent to TerminateProcess.
+
+Do not use a graceful SIGTERM as a substitute for a forced crash.
+
+Do not only kill the process between completed operations.
+
+### 7.4 Required workload modes
+
+Expose stable judge-facing mode names.
+
+The following commands must work:
+
+```bash
+./torture --iterations 100 --seed 999 --mode large-values
+
+./torture --iterations 100 --seed 7 --mode compaction
+
+./torture --iterations 100 --seed 42 --mode recovery-crash
+```
+
+Also implement or verify:
+
+```bash
+./torture --iterations 100 --seed 123 --mode large-batches
+
+./torture --iterations 100 --seed 456 --mode disk-full
+
+./torture --iterations 100 --seed 789 --mode concurrency
+
+./torture --iterations 500 --seed 12345 --mode random
+```
+
+A mode alias is acceptable if it is clearly documented and tested.
+
+Do not silently map a requested mode to a weaker test.
+
+### 7.5 Large-value mode
+
+Test values up to the maximum supported size of 1 MB.
+
+Include:
+
+- Random binary values.
+- Repeated patterns.
+- Empty values.
+- Maximum-size values.
+- Overwrites of existing keys.
+- Deletes after large values.
+- Crashes during large record writes.
+
+Verify all acknowledged values byte-for-byte.
+
+### 7.6 Large-batch mode
+
+Test batches containing up to 10,000 operations.
+
+Include:
+
+- PUT-only batches.
+- DELETE-only batches.
+- Mixed batches.
+- Repeated keys.
+- Multiple operations targeting the same key.
+- Empty values.
+- Maximum-size values where practical.
+- Crashes while the batch is being written.
+- Crashes during commit-marker writing.
+- Crashes after commit but before ACK.
+
+The oracle must determine whether the entire batch was committed or absent.
+
+Never accept partial visibility.
+
+### 7.7 Recovery-crash mode
+
+Test crashes during:
+
+- WAL scanning.
+- Header validation.
+- Record decoding.
+- Index reconstruction.
+- Tail truncation.
+- Transaction recovery.
+- Recovery completion.
+
+Perform repeated sequences such as:
+
+```text
+Open database
+Kill during recovery
+Restart
+Kill during recovery again
+Restart
+Verify state
+```
+
+Recovery must be idempotent.
+
+### 7.8 Compaction mode
+
+Use existing failpoints wherever possible.
+
+Add missing failpoints only if required.
+
+Test kills:
+
+- Before temporary snapshot creation.
+- During temporary snapshot writing.
+- After temporary snapshot writing.
+- Before temporary file sync.
+- After temporary file sync.
+- Before rename.
+- After old file is renamed to backup.
+- After new file is installed.
+- Before directory sync.
+- During cleanup.
+- After cleanup.
+
+After each crash:
+
+1. Restart.
+2. Run `check`.
+3. Run `dump`.
+4. Verify all acknowledged data.
+5. Verify no uncommitted state becomes visible.
+6. Verify the database remains usable.
+
+Do not claim cross-platform atomic rename guarantees without testing the relevant platform.
+
+### 7.9 Disk-full mode
+
+Use the configured maximum database file size.
+
+Test all five required scenarios:
+
+- E1: Cap reached during a single PUT.
+- E2: Cap reached halfway through a batch.
+- E3: Cap reached, then process killed, then restarted.
+- E4: Cap reached during compaction.
+- E5: Deletes followed by compaction free enough space for new writes.
+
+Check:
+
+- Existing acknowledged values remain readable.
+- Failed writes do not corrupt the WAL.
+- Failed batches are not partially visible.
+- Recovery succeeds.
+- Compaction failure does not lose data.
+- The database becomes writable again when space is reclaimed.
+
+If a failed operation may leave an uncommitted tail, recovery must handle it safely.
+
+### 7.10 Concurrency mode
+
+Use at least two concurrent writers.
+
+Test:
+
+- Different-key writes.
+- Same-key writes.
+- Concurrent deletes.
+- Batch versus single PUT.
+- Reader during batch.
+- Multiple readers during writes.
+- Concurrent operations during compaction if supported.
+
+The reader must see either the state before a batch or the state after the batch, never a partial batch.
+
+### 7.11 Self-test mode
+
+Preserve and strengthen the existing oracle self-test.
+
+It must prove that the oracle detects deliberately broken states, including:
+
+1. Lost acknowledged data.
+2. Incorrect or corrupted value.
+3. Torn batch.
+4. Phantom key.
+
+Add more negative cases where useful.
+
+A self-test passing means the oracle successfully detected the intentionally broken conditions. It does not mean the database passed its crash-safety tests.
+
+### 7.12 Failure reporting
+
+On the first failure, stop and print:
+
+- Seed.
+- Iteration.
+- Workload mode.
+- Operation ID.
+- Expected state.
+- Actual state.
+- Database exit code.
+- Last acknowledged operations.
+- Relevant failure stage.
+- Reproduction command.
+
+Preserve enough information to reproduce the failure.
+
+Never print a success summary if any test failed.
+
+---
+
+# PART 8 — DETERMINISTIC CRASH INJECTION
+
+Add or improve deterministic failpoints.
+
+Use the existing failpoint mechanism where possible.
+
+Crash points should be placed around meaningful storage transitions, such as:
+
+```text
+before_record_write
+during_record_write
+after_record_write
+before_file_sync
+after_file_sync
+before_commit_write
+after_commit_write
+after_commit_sync
+before_index_publish
+after_index_publish
+before_ack
+after_ack
+```
+
+For compaction:
+
+```text
+before_temp_create
+during_temp_write
+after_temp_write
+before_temp_sync
+after_temp_sync
+before_old_to_backup_rename
+after_old_to_backup_rename
+before_temp_to_main_rename
+after_temp_to_main_rename
+before_directory_sync
+after_directory_sync
+before_cleanup
+after_cleanup
+```
+
+For recovery:
+
+```text
+before_header_validation
+after_header_validation
+during_record_scan
+during_index_rebuild
+before_tail_truncate
+after_tail_truncate
+before_recovery_complete
+after_recovery_complete
+```
+
+Failpoints must be disabled in normal production execution unless explicitly enabled for testing.
+
+Ensure that enabling a failpoint cannot accidentally alter normal durability semantics.
+
+Test each meaningful crash point through a child process, not only by returning an ordinary error from a unit test.
+
+---
+
+# PART 9 — COMPACTION AND FILESYSTEM SAFETY
+
+Inspect the current compaction implementation carefully.
+
+The database must maintain one authoritative data file.
+
+Temporary and backup files may be used during compaction, but they must never create ambiguous authoritative state.
+
+Verify:
+
+1. Temporary file creation.
+2. Snapshot record writing.
+3. File synchronization.
+4. Snapshot validation.
+5. Rename or swap ordering.
+6. Directory synchronization where supported.
+7. Startup detection of interrupted compaction.
+8. Cleanup of obsolete files.
+9. Recovery after repeated crashes.
+10. Correct handling of platform-specific rename restrictions.
+
+Important:
+
+- Do not delete the old authoritative file before the new file is safely installed.
+- Do not assume a successful file sync also synchronizes its parent directory.
+- Do not assume Windows and Linux have identical rename behaviour.
+- Do not silently overwrite an authoritative file.
+- Ensure startup resolution is deterministic.
+
+Add explicit tests for every transition.
+
+If a guarantee cannot be made on the current platform, document the limitation honestly and implement the strongest safe supported behaviour.
+
+---
+
+# PART 10 — DISK-FULL GUARD HARDENING
+
+Inspect `internal/limits/guard.go` and its callers.
+
+Verify:
+
+- Maximum file size is configurable.
+- Preflight estimates are correct.
+- Integer overflow is prevented.
+- A single PUT cannot exceed the configured cap.
+- A batch is checked as one atomic unit.
+- Failed writes do not partially publish state.
+- Failed writes leave recovery-safe data.
+- Reads remain available after write rejection.
+- Compaction is handled safely when the configured cap is reached.
+- Reclaimed space allows future writes.
+
+Do not confuse:
+
+1. The hackathon's configurable database file-size limit.
+2. The operating system's actual free disk space.
+
+Implement the specified simulated limit correctly. If actual filesystem space is also checked, treat that as an additional safeguard and do not rely on it as a substitute for the configured cap.
+
+---
+
+# PART 11 — PERFORMANCE AND BENCHMARKING
+
+Preserve the existing one-million-key benchmark and make it reproducible.
+
+Required target:
+
+```text
+1,000,000 keys
+Recovery time below 2 seconds
+```
+
+Do not hardcode the previously reported benchmark results.
+
+Create a benchmark procedure that:
+
+1. Creates a fresh database.
+2. Inserts one million distinct keys.
+3. Flushes and closes safely.
+4. Terminates the writer.
+5. Starts a fresh process.
+6. Measures the actual recovery duration.
+7. Checks that all acknowledged keys are present.
+8. Reports actual disk size.
+9. Reports actual write throughput.
+10. Reports actual recovery time.
+
+Make sure the benchmark does not accidentally measure an already-open in-memory index.
+
+Include environment information:
+
+- Operating system.
+- Go version.
+- CPU.
+- RAM if available.
+- Database file size.
+- Number of keys.
+- Number of operations.
+- Benchmark seed.
+
+The benchmark must be repeatable and must never print fabricated values.
+
+Do not optimize for throughput at the expense of durability.
+
+---
+
+# PART 12 — TEST SUITE HARDENING
+
+Run and preserve all existing tests.
+
+Add missing tests for:
+
+- WAL format boundaries.
+- Torn writes.
+- Invalid checksums.
+- Batch atomicity.
+- Concurrent writes.
+- Concurrent reads.
+- Compaction crash recovery.
+- Recovery interrupted by a second crash.
+- Disk-full cases E1–E5.
+- Maximum key/value sizes.
+- Maximum batch size.
+- One-byte file truncation.
+- One-million-key recovery.
+- Clean close.
+- Crash during close.
+- Repeated open and close.
+- Empty database.
+- Deleted-key recovery.
+- Same-key concurrent writes.
+
+Run:
+
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+Run the Python torture tool using the required commands.
+
+If the race detector is unavailable on the target environment, report that explicitly rather than pretending it passed.
+
+Do not hide flaky tests. Identify their cause and fix the underlying problem.
+
+---
+
+# PART 13 — EXACT 32-SCENARIO PROOF REQUIREMENT
+
+The original problem statement contains 32 crash scenarios across Groups A–F.
+
+Inspect the original supplied PDF and identify every scenario.
+
+Create or update the 32-row proof table in `ARCHITECTURE.md`.
+
+Each row must contain:
+
+| Column | Required information |
+|---|---|
+| Scenario | Exact scenario ID |
+| Disk state at crash | What bytes and records exist |
+| Recovery mechanism | Exact logic handling the case |
+| Code location | Actual file and function |
+| Verification | Actual test or torture mode |
+| Status | Verified, not verified, or failed |
+
+Do not invent code locations.
+
+Do not mark a scenario verified merely because a related test exists.
+
+Every row must reflect the actual current implementation.
+
+The table must include all scenarios from Groups A–F, not just the scenarios that are convenient to test.
+
+If a scenario is not implemented, identify it and fix it where possible.
+
+---
+
+# PART 14 — ARCHITECTURE DOCUMENTATION
+
+Update `ARCHITECTURE.md`.
+
+It must include:
+
+### 1. Architecture diagram
+
+Show:
+
+- Client API.
+- Write path.
+- In-memory index.
+- WAL writer.
+- Record format.
+- Commit marker logic.
+- Synchronization points.
+- Recovery routine.
+- Compaction routine.
+- Disk-full guard.
+- Locks and concurrency boundaries.
+
+### 2. On-disk layout
+
+Document:
+
+- Every field.
+- Field size in bytes.
+- Byte ordering.
+- Record structure.
+- Checksums.
+- Batch representation.
+- Commit representation.
+- File header.
+- Temporary and backup files.
+- Authoritative file selection.
+
+### 3. Write ordering
+
+Show the actual write order with numbered steps.
+
+For example:
+
+```text
+1. Validate request.
+2. Acquire writer lock.
+3. Check configured size limit.
+4. Encode record or transaction.
+5. Append bytes.
+6. Synchronize required data.
+7. Write or synchronize commit marker if applicable.
+8. Publish the committed state to the index.
+9. Release the appropriate lock.
+10. Return success / ACK.
+```
+
+Only use steps that match the actual implementation.
+
+### 4. Recovery flow
+
+Show:
+
+```text
+Open
+  |
+Validate file/header
+  |
+Resolve interrupted compaction
+  |
+Scan records
+  |
+Validate framing and checksums
+  |
+Identify committed state
+  |
+Rebuild index
+  |
+Handle incomplete tail
+  |
+Ready
+```
+
+Modify the diagram if the actual recovery algorithm differs.
+
+### 5. Three mandatory guarantees
+
+Write a precise argument for:
+
+- Durability.
+- Batch atomicity.
+- Recoverability.
+
+Name the actual system calls and ordering.
+
+Avoid vague statements such as "WAL makes it safe."
+
+---
+
+# PART 15 — BREAKING.MD
+
+Keep `BREAKING.md` within the problem statement's two-page limit.
+
+It must contain the five required sections:
+
+1. Crash-points table, ideally 8–15 meaningful rows.
+2. Exact write-ordering argument.
+3. At least three honest known weaknesses.
+4. What was tried and failed.
+5. Three improvements that would be made with 24 additional hours.
+
+Do not invent failed experiments.
+
+If the project history does not reveal a failed experiment, clearly mark it as not recorded and ask the developer to add the real experience.
+
+Every crash point must match the actual source code.
+
+Do not describe a guarantee that the implementation does not provide.
+
+---
+
+# PART 16 — README.MD
+
+Update the README so a judge can build and run the project without guessing.
+
+Include:
+
+- Project overview.
+- Requirements.
+- One clean build command.
+- All mandatory CLI commands.
+- Batch file format.
+- Serve input/output protocol.
+- WAL format summary.
+- Recovery algorithm.
+- Compaction behaviour.
+- Disk-full configuration.
+- Torture tool usage.
+- Required workload modes.
+- Benchmark command.
+- Test commands.
+- Windows instructions.
+- Linux/macOS instructions where supported.
+
+Verify every documented command.
+
+Do not leave commands that do not work.
+
+---
+
+# PART 17 — PROMPTS.MD AND DEMO.MD
+
+Preserve the existing `PROMPTS.md`.
+
+Do not fabricate historical prompts or timestamps.
+
+Add a new section documenting the current AI-assisted implementation session with the actual tool name and approximate time only when known.
+
+The original problem statement requires chronological, unedited prompts from the hackathon. Do not silently rewrite or backdate previous entries.
+
+Update `DEMO.md` with a reliable 15-minute offline judging sequence.
+
+Include:
+
+- Clean build.
+- Basic database operations.
+- Batch atomicity demonstration.
+- Torture tool execution.
+- Compaction test.
+- Recovery crash demonstration.
+- `check` and `dump`.
+- Crash-here explanation.
+- Design extension explanation.
+
+Ensure the demo works without Wi-Fi.
+
+---
+
+# PART 18 — OPTIONAL IMPROVEMENTS
+
+Only after every mandatory requirement is satisfied, consider the following.
+
+These are optional and must not introduce risk to the core engine.
+
+### A. WAL inspection
+
+Provide a diagnostic facility that can display:
+
+- Header information.
+- Record boundaries.
+- Record types.
+- Record lengths.
+- Checksums.
+- Transaction IDs.
+- Commit status.
+- Invalid tail information.
+
+It must be read-only and must not mutate the database.
+
+### B. Structured errors
+
+Introduce or improve meaningful error categories for:
+
+- Invalid key.
+- Invalid value.
+- Invalid batch.
+- Database closed.
+- Disk-full limit.
+- Corrupt header.
+- Invalid checksum.
+- Truncated record.
+- I/O failure.
+- Compaction failure.
+
+Preserve useful error wrapping and error inspection.
+
+### C. Property-based operation testing
+
+Generate reproducible random sequences of:
+
+- PUT.
+- GET.
+- DELETE.
+- BATCH.
+- OPEN.
+- CLOSE.
+- COMPACT.
+
+Compare results with an independent in-memory reference model.
+
+### D. Operational diagnostics
+
+If appropriate, add read-only statistics such as:
+
+- Live key count.
+- Total record count.
+- Tombstone count.
+- WAL size.
+- Recovered record count.
+- Recovery duration.
+- Last valid committed offset.
+
+Do not let diagnostics interfere with database correctness.
+
+### E. Performance improvements
+
+Only optimize after measuring.
+
+Preserve durability and recovery correctness.
+
+---
+
+# PART 19 — IMPLEMENTATION WORKFLOW
+
+Follow this exact workflow.
+
+### Phase 1: Inspect
+
+Read the full existing repository and identify its current state.
+
+### Phase 2: Audit
+
+Create a requirement matrix.
+
+### Phase 3: Plan
+
+Identify the smallest safe set of changes.
+
+### Phase 4: Implement
+
+Modify the existing source files.
+
+Prefer small, focused changes.
+
+Avoid rewriting working modules.
+
+### Phase 5: Test
+
+Run unit, integration, concurrency, recovery, disk-full, compaction, and torture tests.
+
+### Phase 6: Fix
+
+Resolve failures before moving forward.
+
+Do not skip a failed test and continue claiming completion.
+
+### Phase 7: Documentation
+
+Update README, ARCHITECTURE, BREAKING, DEMO, and PROMPTS appropriately.
+
+### Phase 8: Final verification
+
+Run the full test suite and the required judge-facing commands.
+
+### Phase 9: Final audit
+
+Produce the final compliance report.
+
+---
+
+# PART 20 — FINAL ACCEPTANCE CRITERIA
+
+The implementation is not considered complete until the following have been verified.
+
+## Core engine
+
+- [ ] All six library operations work.
+- [ ] One authoritative database file is maintained.
+- [ ] One million keys are supported.
+- [ ] Key/value limits are enforced.
+- [ ] Batch size up to 10,000 is supported.
+- [ ] Batch atomicity is demonstrated.
+- [ ] Concurrent access is safe.
+- [ ] Recovery completes in under two seconds for one million keys in the tested environment.
+- [ ] Acknowledged writes survive process crashes.
+
+## CLI
+
+- [ ] `open`
+- [ ] `put`
+- [ ] `get`
+- [ ] `del`
+- [ ] `batch`
+- [ ] `dump`
+- [ ] `check`
+- [ ] `serve`
+
+All commands must work using the documented syntax.
+
+## Torture tool
+
+- [ ] Default 500 iterations.
+- [ ] Reproducible `--seed`.
+- [ ] Independent oracle.
+- [ ] At least two concurrent writers.
+- [ ] Genuine random kill timing.
+- [ ] Forced process termination.
+- [ ] Correct ACK tracking.
+- [ ] Correct batch atomicity checks.
+- [ ] Large-value mode.
+- [ ] Large-batch mode.
+- [ ] Recovery-crash mode.
+- [ ] Compaction mode.
+- [ ] Disk-full mode.
+- [ ] Concurrency mode.
+- [ ] Oracle self-tests.
+- [ ] Reproduction information on failure.
+
+## Crash recovery
+
+- [ ] All 32 original scenarios are addressed in the proof table.
+- [ ] Repeated recovery crashes are safe.
+- [ ] Torn tail handling works.
+- [ ] Interrupted compaction is safe.
+- [ ] Interrupted close does not violate durability.
+
+## Disk full
+
+- [ ] E1.
+- [ ] E2.
+- [ ] E3.
+- [ ] E4.
+- [ ] E5.
+
+## Documentation
+
+- [ ] README.md.
+- [ ] ARCHITECTURE.md.
+- [ ] BREAKING.md.
+- [ ] PROMPTS.md.
+- [ ] DEMO.md.
+- [ ] Architecture diagram.
+- [ ] 32-row proof table.
+- [ ] Three guarantee arguments.
+
+## Offline operation
+
+- [ ] Clean build works.
+- [ ] No network access is required.
+- [ ] Judge-facing commands work locally.
+- [ ] Windows launchers work.
+
+---
+
+# PART 21 — FINAL RESPONSE FORMAT
+
+When implementation is complete, provide a detailed report in this structure:
+
+## 1. Initial audit
+
+What was already implemented and what was missing.
+
+## 2. Changes made
+
+List every modified and newly created file, with a concise explanation.
+
+## 3. Mandatory compliance
+
+Use a table:
+
+| Requirement | Result | Evidence |
+|---|---|---|
+| Core engine | PASS / FAIL / UNVERIFIED | Test/function |
+| WAL durability | PASS / FAIL / UNVERIFIED | Test/function |
+| Batch atomicity | PASS / FAIL / UNVERIFIED | Test/function |
+| Compaction | PASS / FAIL / UNVERIFIED | Test/function |
+| Disk-full | PASS / FAIL / UNVERIFIED | Test/function |
+| CLI | PASS / FAIL / UNVERIFIED | Command |
+| Torture tool | PASS / FAIL / UNVERIFIED | Command |
+| Recovery | PASS / FAIL / UNVERIFIED | Test/function |
+| Documentation | PASS / FAIL / UNVERIFIED | File |
+
+## 4. Test results
+
+Show the actual commands executed and their actual results.
+
+## 5. Performance
+
+Report measured performance only. Clearly identify the machine and environment.
+
+## 6. Remaining issues
+
+List every unresolved issue honestly.
+
+## 7. How to run
+
+Give the exact Windows commands and, if supported, Linux/macOS commands.
+
+## 8. Judge demonstration
+
+Give the exact recommended 15-minute sequence.
+
+---
+
+# FINAL INSTRUCTION
+
+Start by inspecting the uploaded TORQ ZIP file and the original problem statement.
+
+Then audit and improve the existing implementation directly.
+
+**Do not merely give me recommendations, pseudocode, or a list of things I should implement. Make the actual code changes wherever your environment permits.**
+
+Preserve working functionality, add the missing mandatory requirements, test every change, and provide the final compliance report.
+
+If you cannot directly edit or execute a particular file in the current environment, identify that limitation and provide the complete exact replacement or patch rather than pretending the work was completed.
+
+The priority order is:
+
+1. Correctness.
+2. Durability.
+3. Batch atomicity.
+4. Crash recovery.
+5. Compaction safety.
+6. Independent torture verification.
+7. Mandatory compliance.
+8. Performance.
+9. Documentation.
+10. Optional improvements.
+
+Do not waste time building a website or adding unrelated features.
+
+**The goal is not to make TORQ look impressive. The goal is to make TORQ survive being killed at any moment and prove that it survived.**

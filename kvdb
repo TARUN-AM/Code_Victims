@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+# POSIX launcher script for TORQ kvdb binary
+# Builds bin/kvdb if missing or outdated, then forwards all arguments
+
+set -e
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$ROOT_DIR/bin/kvdb"
+
+if [ ! -f "$BIN" ] || [ "$ROOT_DIR/cmd/kvdb/main.go" -nt "$BIN" ]; then
+    mkdir -p "$ROOT_DIR/bin"
+    if command -v go >/dev/null 2>&1; then
+        (cd "$ROOT_DIR" && go build -o bin/kvdb ./cmd/kvdb)
+    fi
+fi
+
+if [ -f "$BIN" ]; then
+    exec "$BIN" "$@"
+else
+    echo "Error: bin/kvdb binary not found. Build it with: go build -o bin/kvdb ./cmd/kvdb" >&2
+    exit 1
+fi

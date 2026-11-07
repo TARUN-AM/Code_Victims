@@ -1,0 +1,6 @@
+{
+  "name": "TORQ - Crash-Safe Key-Value Database",
+  "description": "Embedded crash-safe key-value database engine and torture test harness for the Kill It and Prove It hackathon.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
